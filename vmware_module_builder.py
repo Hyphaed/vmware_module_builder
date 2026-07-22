@@ -1033,6 +1033,50 @@ def _autopatch_module_define(vmmon_dir: Path, vmnet_dir: Path):
 # (See AP-04 above)
 
 
+# ── [AP-16] vmmon/vmnet: suppress UBSAN sanitizer flags ──────────────────────
+#
+# Problem:  Kernels with CONFIG_UBSAN=y + CONFIG_UBSAN_BOUNDS_STRICT=y etc.
+#           inject -fsanitize=bounds-strict -fsanitize=shift -fsanitize=bool
+#           -fsanitize=enum into every module compilation (including external
+#           modules) via scripts/Makefile.lib's is-kernel-object path.
+#           VMware's vmnet/vmmon source triggers UBSAN checks at runtime,
+#           causing silent packet-forwarding failures and VM instability while
+#           the module loads successfully (build exit code 0).
+#           Observed on kernel 7.1.1-hyphaed: DHCP works (internal socket
+#           path) but IP bridging is completely broken.
+# Probe:    Check for UBSAN_SANITIZE in Makefile.kernel.
+# Fix:      Add UBSAN_SANITIZE := n to Makefile.kernel for both modules.
+#           The kernel's Makefile.lib checks this variable before adding
+#           UBSAN flags — setting it to 'n' strips them from the concatenated
+#           per-file decision string, making the patsubst condition false.
+
+def _autopatch_ubsan_suppress(vmmon_dir: Path, vmnet_dir: Path):
+    for module_dir in (vmmon_dir, vmnet_dir):
+        mk = module_dir / "Makefile.kernel"
+        if not mk.exists():
+            continue
+        text = _read(mk)
+        if "UBSAN_SANITIZE" in text:
+            info(f"    {module_dir.name} Makefile: UBSAN_SANITIZE already set — skipped")
+            continue
+        # Match the complete obj-m line (e.g. "obj-m += $(DRIVER).o") so that
+        # _patch_insert_after doesn't split the assignment mid-line and strand
+        # the module name on the UBSAN_SANITIZE line (leaving obj-m empty).
+        import re as _re
+        m = _re.search(r'^obj-m\s*\+=.*$', text, _re.MULTILINE)
+        if not m:
+            warn(f"    {module_dir.name} Makefile: cannot find obj-m line for UBSAN suppression")
+            continue
+        anchor = m.group(0)
+        _patch_insert_after(
+            mk, anchor,
+            "\n\n# Suppress UBSAN: VMware source triggers sanitizer UB checks at runtime,\n"
+            "# silently breaking packet forwarding while module load succeeds.\n"
+            "UBSAN_SANITIZE := n",
+            f"{module_dir.name} Makefile: UBSAN_SANITIZE := n (suppress runtime UB checks)",
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Orchestrator — decides which autopatches to run based on kernel version and
 # actual file content probing
@@ -1084,6 +1128,9 @@ def apply_all_patches(build_dir: Path, kver: KernelVersion, optimized: bool,
 
     info("  [AP-13] Module identity defines in Makefile.kernel")
     _autopatch_module_define(vmmon_dir, vmnet_dir)
+
+    info("  [AP-16] UBSAN sanitizer suppression for vmmon/vmnet")
+    _autopatch_ubsan_suppress(vmmon_dir, vmnet_dir)
 
     # ── Objtool patches (kernel >= 6.17 / 7.x) ────────────────────────────────
     if kver.needs_objtool_patches():
@@ -1637,6 +1684,9 @@ StandardError=journal
 WantedBy=multi-user.target
 """
     unit_path = Path("/etc/systemd/system/vmware.service")
+    # Remove any existing file or mask symlink (tee follows symlinks, so writing to a
+    # /dev/null mask would silently discard the content without error).
+    subprocess.run(["sudo", "rm", "-f", str(unit_path)], capture_output=True)
     result = subprocess.run(
         ["sudo", "tee", str(unit_path)],
         input=unit_content, text=True, capture_output=True,

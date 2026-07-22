@@ -21,3 +21,6 @@ scripts/*.log.*
 
 # System-specific utility scripts (not for distribution)
 scripts/disable-ollama.sh
+
+# Local tool cache artifacts
+.mcp-cache/

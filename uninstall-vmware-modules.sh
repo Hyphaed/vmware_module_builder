@@ -168,7 +168,8 @@ CONFIGS=(
 )
 
 for cfg in "${CONFIGS[@]}"; do
-    if [[ -f "${cfg}" ]]; then
+    # Use -e or -L so symlinks (e.g. a /dev/null mask) are also matched
+    if [[ -e "${cfg}" || -L "${cfg}" ]]; then
         rm -f "${cfg}"
         ok "Removed: ${cfg}"
     else
@@ -176,11 +177,12 @@ for cfg in "${CONFIGS[@]}"; do
     fi
 done
 
-if systemctl list-unit-files vmware.service &>/dev/null; then
-    systemctl disable vmware.service 2>/dev/null && ok "vmware.service disabled" || true
-    systemctl daemon-reload
-    ok "systemd daemon reloaded"
-fi
+# Reload after removing the unit file so systemd no longer sees the unit.
+# Do NOT call 'systemctl disable' here — on systems where VMware ships a SysV
+# init script, disabling after the unit file is gone causes systemd to create a
+# /dev/null mask that blocks future installs from recreating the service.
+systemctl daemon-reload
+ok "systemd daemon reloaded"
 
 # ── Step 6 (option 1 only): Restore original VMware sources ───────────────────
 if [[ "${CHOICE}" == "1" ]]; then
