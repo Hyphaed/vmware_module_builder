@@ -182,7 +182,18 @@ fi
 section "Running VMware Module Builder (patch + build + install)"
 echo ""
 
-python3 "${PYTHON_SCRIPT}"
+# The builder writes the make vars of the selected compilation mode here, so
+# that DKMS rebuilds use the same (optimized or vanilla) flags.
+DKMS_FLAGS_FILE="$(mktemp)"
+trap 'rm -f "${DKMS_FLAGS_FILE}"' EXIT
+
+if ! VMB_DKMS_MAKE_FLAGS_FILE="${DKMS_FLAGS_FILE}" python3 "${PYTHON_SCRIPT}"; then
+    echo ""
+    err "vmware_module_builder.py failed — see the output above."
+    err "Not registering anything with DKMS: the tarballs in ${VMWARE_MOD_DIR}"
+    err "would still contain unpatched sources that cannot build on this kernel."
+    exit 1
+fi
 
 echo ""
 ok "Build and install complete."
@@ -216,6 +227,11 @@ if [[ -z "${VMWARE_VER}" ]]; then
 fi
 
 ok "VMware version: ${VMWARE_VER} (DKMS module version)"
+
+DKMS_MAKE_FLAGS="$(cat "${DKMS_FLAGS_FILE}" 2>/dev/null || true)"
+if [[ -n "${DKMS_MAKE_FLAGS}" ]]; then
+    ok "DKMS make flags: ${DKMS_MAKE_FLAGS}"
+fi
 
 # ── Purge ALL pre-existing DKMS registrations for vmmon/vmnet ────────────────
 # This removes any registration VMware's own installer (vmware-installer,
@@ -279,7 +295,7 @@ PACKAGE_VERSION="${VMWARE_VER}"
 BUILT_MODULE_NAME[0]="vmmon"
 BUILT_MODULE_LOCATION[0]="."
 DEST_MODULE_LOCATION[0]="/updates/dkms"
-MAKE[0]="make VM_UNAME=\${kernelver}"
+MAKE[0]="make VM_UNAME=\${kernelver}${DKMS_MAKE_FLAGS:+ ${DKMS_MAKE_FLAGS}}"
 CLEAN="make clean"
 AUTOINSTALL="yes"
 EOF
@@ -291,7 +307,7 @@ PACKAGE_VERSION="${VMWARE_VER}"
 BUILT_MODULE_NAME[0]="vmnet"
 BUILT_MODULE_LOCATION[0]="."
 DEST_MODULE_LOCATION[0]="/updates/dkms"
-MAKE[0]="make VM_UNAME=\${kernelver}"
+MAKE[0]="make VM_UNAME=\${kernelver}${DKMS_MAKE_FLAGS:+ ${DKMS_MAKE_FLAGS}}"
 CLEAN="make clean"
 AUTOINSTALL="yes"
 EOF

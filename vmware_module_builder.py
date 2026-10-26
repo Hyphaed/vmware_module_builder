@@ -10,6 +10,7 @@ import subprocess
 import sys
 import os
 import re
+import shlex
 import hashlib
 import tarfile
 import tempfile
@@ -1016,11 +1017,16 @@ def _autopatch_module_define(vmmon_dir: Path, vmnet_dir: Path):
         if f"-D{define}" in text:
             info(f"    {mk.name} ({module_dir.name}): -D{define} already present — skipped")
             continue
-        anchor = "ccflags-y :="
-        if anchor not in text:
+        # Match the complete assignment line and insert *before* it: ccflags-y :=
+        # is simply-expanded, so CC_OPTS must be extended first. Inserting after
+        # the bare "ccflags-y :=" token would split the line and leave ccflags-y
+        # empty, dropping CC_OPTS/INCLUDE (and all optimization flags) entirely.
+        m = re.search(r'^ccflags-y\s*:=.*$', text, re.MULTILINE)
+        if not m:
             continue
-        _patch_insert_after(mk, anchor,
-            f"\n\n# Module identity define\nCC_OPTS += -D{define}",
+        line = m.group(0)
+        _patch_replace(mk, line,
+            f"# Module identity define\nCC_OPTS += -D{define}\n\n{line}",
             f"{module_dir.name} Makefile: add -D{define} module identity flag")
 
 
@@ -1108,9 +1114,14 @@ def apply_all_patches(build_dir: Path, kver: KernelVersion, optimized: bool,
     # subsequent _autopatch_* functions can work from a consistent starting point.
     # The primary patching path for all supported installs is always the
     # _autopatch_* functions below — the overlay is a secondary, legacy fallback.
+    #
+    # Detection is based on the Makefile style, not on has_task_state_guard:
+    # 17.6.4 already ships the task->__state guard but still passes its include
+    # paths via EXTRA_CFLAGS, so skipping the overlay there breaks the build
+    # with "driver-config.h: No such file or directory" (issue #22).
     if kver.needs_base_616_patches():
-        if src_info.has_task_state_guard:
-            info("  Legacy 6.16.x overlay: 25H2u1 sources detected (modern APIs present) — skipping")
+        if not (src_info.vmmon_uses_extra_cflags or src_info.vmnet_uses_extra_cflags):
+            info("  Legacy 6.16.x overlay: 25H2u1 sources detected (ccflags-y Makefiles) — skipping")
         elif UPSTREAM_616_DIR.exists():
             ok("  Legacy 6.16.x overlay: pre-25H2u1 sources detected — applying community overlay")
             copy_upstream_source("vmmon", build_dir)
@@ -1920,9 +1931,11 @@ class VmwareSourceInfo:
         vmmon_mk = _read(vmmon_dir / "Makefile.kernel") if (vmmon_dir / "Makefile.kernel").exists() else ""
         vmnet_mk = _read(vmnet_dir / "Makefile.kernel") if (vmnet_dir / "Makefile.kernel").exists() else ""
 
-        # Older VMware: EXTRA_CFLAGS; newer: CC_OPTS + ccflags-y
-        self.vmmon_uses_extra_cflags = "EXTRA_CFLAGS" in vmmon_mk and "CC_OPTS += -DVMMON" not in vmmon_mk
-        self.vmnet_uses_extra_cflags = "EXTRA_CFLAGS" in vmnet_mk
+        # Older VMware (<= 17.6.x): flags only via EXTRA_CFLAGS, which kbuild
+        # ignores since kernel 6.15; newer (25H2u1+): ccflags-y.
+        # Note: 17.6.4 also has CC_OPTS += -DVMMON, so CC_OPTS is not a discriminator.
+        self.vmmon_uses_extra_cflags = "EXTRA_CFLAGS" in vmmon_mk and "ccflags-y" not in vmmon_mk
+        self.vmnet_uses_extra_cflags = "EXTRA_CFLAGS" in vmnet_mk and "ccflags-y" not in vmnet_mk
 
         # ── Source API usage ──────────────────────────────────────────────────
         hostif = _read(vmmon_dir / "linux" / "hostif.c") if (vmmon_dir / "linux" / "hostif.c").exists() else ""
@@ -2084,6 +2097,15 @@ def main():
                        arcname=f"{module}-only")
             run(["sudo", "cp", str(tarball), str(VMWARE_MOD_DIR / f"{module}.tar")])
             ok(f"{module}.tar updated in {VMWARE_MOD_DIR}")
+
+        # ── Hand make flags over to the DKMS installer ────────────────────────
+        # DKMS rebuilds from the repacked tarball with its own make command, so
+        # without these vars the VMWARE_OPTIMIZE block in Makefile.kernel is
+        # never enabled and DKMS silently installs a vanilla build.
+        flags_file = os.environ.get("VMB_DKMS_MAKE_FLAGS_FILE")
+        if flags_file:
+            dkms_flags = [f for f in extra_make_flags if not f.startswith("-j")]
+            _write(Path(flags_file), shlex.join(dkms_flags) + "\n")
 
     # ── depmod ────────────────────────────────────────────────────────────────
     section("Post-install setup")
