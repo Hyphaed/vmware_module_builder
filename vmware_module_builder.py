@@ -10,6 +10,7 @@ import subprocess
 import sys
 import os
 import re
+import shlex
 import hashlib
 import tarfile
 import tempfile
@@ -2096,6 +2097,15 @@ def main():
                        arcname=f"{module}-only")
             run(["sudo", "cp", str(tarball), str(VMWARE_MOD_DIR / f"{module}.tar")])
             ok(f"{module}.tar updated in {VMWARE_MOD_DIR}")
+
+        # ── Hand make flags over to the DKMS installer ────────────────────────
+        # DKMS rebuilds from the repacked tarball with its own make command, so
+        # without these vars the VMWARE_OPTIMIZE block in Makefile.kernel is
+        # never enabled and DKMS silently installs a vanilla build.
+        flags_file = os.environ.get("VMB_DKMS_MAKE_FLAGS_FILE")
+        if flags_file:
+            dkms_flags = [f for f in extra_make_flags if not f.startswith("-j")]
+            _write(Path(flags_file), shlex.join(dkms_flags) + "\n")
 
     # ── depmod ────────────────────────────────────────────────────────────────
     section("Post-install setup")
