@@ -182,7 +182,13 @@ fi
 section "Running VMware Module Builder (patch + build + install)"
 echo ""
 
-python3 "${PYTHON_SCRIPT}"
+if ! python3 "${PYTHON_SCRIPT}"; then
+    echo ""
+    err "vmware_module_builder.py failed — see the output above."
+    err "Not registering anything with DKMS: the tarballs in ${VMWARE_MOD_DIR}"
+    err "would still contain unpatched sources that cannot build on this kernel."
+    exit 1
+fi
 
 echo ""
 ok "Build and install complete."
